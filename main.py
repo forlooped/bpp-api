@@ -307,3 +307,33 @@ def create_api_key(customer_email: str, calls_limit: int = 1000) -> str:
 # To manually create a key, run in Python:
 # from main import create_api_key
 # print(create_api_key("test@example.com", 1000))
+
+# ============================================================================
+# ADMIN ENDPOINT (Temporary - for creating API keys)
+# ============================================================================
+
+@app.post("/admin/create-key")
+def admin_create_key(
+    email: str,
+    calls_limit: int = 1000,
+    admin_secret: str = Header(None, alias="X-Admin-Secret")
+):
+    """
+    Admin endpoint to create API keys
+    Requires X-Admin-Secret header for security
+    """
+    
+    # Replace this with a real secret you choose
+    ADMIN_SECRET = os.getenv("ADMIN_SECRET", "change-me-in-production")
+    
+    if admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+    
+    api_key = create_api_key(email, calls_limit)
+    
+    return {
+        "api_key": api_key,
+        "email": email,
+        "calls_limit": calls_limit,
+        "created_at": datetime.utcnow().isoformat()
+    }
