@@ -3,20 +3,25 @@ BackPocket Power API - Should Escalate Endpoint
 Production-ready FastAPI application
 """
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
-import openai
 import os
 import sqlite3
 from datetime import datetime
 import secrets
 
+# OpenAI v1-style client
+from openai import OpenAI
+
+# Stripe
+import stripe
+
 app = FastAPI(
     title="BackPocket Power API",
     description="AI-powered escalation detection for customer messages",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # CORS - allows browsers to call your API
@@ -32,8 +37,17 @@ app.add_middleware(
 # CONFIGURATION
 # ============================================================================
 
-# Set your OpenAI API key here (or use environment variable)
-openai.api_key = os.getenv("OPENAI_API_KEY", "your-openai-key-here")
+# OpenAI client
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-key-here")
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Stripe config
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "your-stripe-secret-here")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "your-webhook-secret-here")
+
+# Your own free/admin identity
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "you@backpocketpower.com")
+ADMIN_KEY_PREFIX = os.getenv("ADMIN_KEY_PREFIX", "sk_admin_")
 
 # Database for tracking usage
 DB_PATH = "api_usage.db"
@@ -89,6 +103,26 @@ class ErrorResponse(BaseModel):
     detail: Optional[str] = None
 
 # ============================================================================
+# HELPERS FOR ADMIN / FREE KEY
+# ============================================================================
+
+def is_free_key_record(row: tuple) -> bool:
+    """
+    row = (key, customer_email, calls_limit, calls_used, created_at, active)
+    Treat keys as free/unlimited if:
+    - email == ADMIN_EMAIL, or
+    - key starts with ADMIN_KEY_PREFIX
+    """
+    if not row:
+        return False
+    key, customer_email, *_rest = row
+    if customer_email == ADMIN_EMAIL:
+        return True
+    if key.startswith(ADMIN_KEY_PREFIX):
+        return True
+    return False
+
+# ============================================================================
 # API KEY VALIDATION
 # ============================================================================
 
@@ -107,26 +141,28 @@ def validate_api_key(authorization: str = Header(None)):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # Check if key exists and is active
-    c.execute("SELECT calls_limit, calls_used, active FROM api_keys WHERE key = ?", (api_key,))
-    result = c.fetchone()
+    # Fetch full row so we can detect free/admin keys
+    c.execute("SELECT key, customer_email, calls_limit, calls_used, created_at, active FROM api_keys WHERE key = ?", (api_key,))
+    row = c.fetchone()
 
-    if not result:
+    if not row:
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    calls_limit, calls_used, active = result
+    key, customer_email, calls_limit, calls_used, created_at, active = row
 
     if not active:
         conn.close()
         raise HTTPException(status_code=403, detail="API key has been deactivated")
 
-    if calls_used >= calls_limit:
-        conn.close()
-        raise HTTPException(
-            status_code=402,
-            detail=f"Usage limit reached ({calls_used}/{calls_limit} calls). Please upgrade."
-        )
+    # Free/admin keys bypass quota checks
+    if not is_free_key_record(row):
+        if calls_used >= calls_limit:
+            conn.close()
+            raise HTTPException(
+                status_code=402,
+                detail=f"Usage limit reached ({calls_used}/{calls_limit} calls). Please upgrade."
+            )
 
     conn.close()
     return api_key
@@ -160,8 +196,10 @@ Do NOT escalate routine questions, simple requests, or friendly messages."""
         user_message += f"\n\nContext: {context}"
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # Fast and cheap for this use case
+        import json
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
@@ -170,7 +208,6 @@ Do NOT escalate routine questions, simple requests, or friendly messages."""
             temperature=0.3
         )
 
-        import json
         result = json.loads(response.choices[0].message.content)
 
         # Ensure all required fields exist
@@ -199,8 +236,12 @@ def log_usage(api_key: str, endpoint: str, success: bool):
         (api_key, datetime.utcnow().isoformat(), endpoint, 1 if success else 0)
     )
 
-    # Increment usage counter
-    c.execute("UPDATE api_keys SET calls_used = calls_used + 1 WHERE key = ?", (api_key,))
+    # Increment usage counter, unless it's a free/admin key
+    c.execute("SELECT key, customer_email, calls_limit, calls_used, created_at, active FROM api_keys WHERE key = ?", (api_key,))
+    row = c.fetchone()
+
+    if row and not is_free_key_record(row):
+        c.execute("UPDATE api_keys SET calls_used = calls_used + 1 WHERE key = ?", (api_key,))
 
     conn.commit()
     conn.close()
@@ -215,7 +256,7 @@ def root():
     return {
         "service": "BackPocket Power API",
         "status": "operational",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "docs": "/docs"
     }
 
@@ -229,22 +270,21 @@ def should_escalate(
 
     **Authentication:** Bearer token in Authorization header
 
-    **Rate limiting:** Based on your plan (1000/3000/10000 calls)
-
-    **Returns 402** when usage limit is reached
+    **Rate limiting:** Based on your plan (1000/3000/10000 calls).
+    Free/admin keys bypass quota but still log usage.
     """
 
     try:
         # Analyze the message
         result = analyze_message(request.message, request.context)
 
-        # Log successful usage
+        # Log usage
         log_usage(api_key, "/should-escalate", True)
 
         return EscalationResponse(**result)
 
     except Exception as e:
-        # Log failed attempt (still counts against quota)
+        # Log failed attempt
         log_usage(api_key, "/should-escalate", False)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -271,25 +311,19 @@ def check_usage(api_key: str = Depends(validate_api_key)):
         "calls_used": calls_used,
         "calls_limit": calls_limit,
         "calls_remaining": calls_limit - calls_used,
-        "percentage_used": round((calls_used / calls_limit) * 100, 2)
+        "percentage_used": round((calls_used / calls_limit) * 100, 2) if calls_limit > 0 else None
     }
 
 # ============================================================================
 # ADMIN FUNCTIONS (for you to create API keys)
 # ============================================================================
 
-def create_api_key(customer_email: str, calls_limit: int = 1000) -> str:
+def create_api_key(customer_email: str, calls_limit: int = 1000, prefix: Optional[str] = "sk_") -> str:
     """
     Create a new API key for a customer
-
-    Run this function manually when someone pays:
-
-    from main import create_api_key
-    key = create_api_key("customer@example.com", 1000)
-    print(f"API Key: {key}")
     """
 
-    api_key = f"sk_{secrets.token_urlsafe(32)}"
+    api_key = f"{prefix}{secrets.token_urlsafe(32)}"
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -304,36 +338,100 @@ def create_api_key(customer_email: str, calls_limit: int = 1000) -> str:
 
     return api_key
 
-# To manually create a key, run in Python:
-# from main import create_api_key
-# print(create_api_key("test@example.com", 1000))
-
 # ============================================================================
-# ADMIN ENDPOINT (Temporary - for creating API keys)
+# ADMIN ENDPOINT (for manual / bootstrap)
 # ============================================================================
 
 @app.post("/admin/create-key")
 def admin_create_key(
     email: str,
     calls_limit: int = 1000,
-    admin_secret: str = Header(None, alias="X-Admin-Secret")
+    admin_secret: str = Header(None, alias="X-Admin-Secret"),
+    admin_prefix: Optional[str] = None,
 ):
     """
     Admin endpoint to create API keys
-    Requires X-Admin-Secret header for security
+    Requires X-Admin-Secret header for security.
+    If admin_prefix is provided, that prefix is used for the key (e.g. "sk_admin_").
     """
-    
-    # Replace this with a real secret you choose
     ADMIN_SECRET = os.getenv("ADMIN_SECRET", "change-me-in-production")
-    
+
     if admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Invalid admin secret")
-    
-    api_key = create_api_key(email, calls_limit)
-    
+
+    prefix = admin_prefix if admin_prefix else "sk_"
+    api_key = create_api_key(email, calls_limit, prefix=prefix)
+
     return {
         "api_key": api_key,
         "email": email,
         "calls_limit": calls_limit,
         "created_at": datetime.utcnow().isoformat()
     }
+
+# ============================================================================
+# STRIPE WEBHOOK (auto-create keys after payment)
+# ============================================================================
+
+def map_price_to_quota(price_id: Optional[str], session: dict) -> Optional[int]:
+    """
+    Map Stripe price_id or amount to a calls_limit.
+    Adjust this mapping to your actual Stripe Price IDs and tiers.
+    """
+    price_map = {
+        # example IDs – replace with your real Stripe price IDs
+        "price_bpp_small": 1000,   # e.g. $20 → 1000 calls
+        "price_bpp_medium": 3000,  # e.g. $50 → 3000 calls
+        "price_bpp_large": 10000,  # e.g. $100 → 10000 calls
+    }
+
+    if price_id and price_id in price_map:
+        return price_map[price_id]
+
+    # Fallback: derive from amount_total (Stripe Checkout)
+    amount_cents = session.get("amount_total")
+    if amount_cents:
+        # Example: 1 cent = 1 call (tune as needed)
+        return int(amount_cents)
+
+    return None
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Stripe webhook endpoint.
+    Creates an API key automatically when a checkout.session.completed event fires.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig_header,
+            secret=STRIPE_WEBHOOK_SECRET,
+        )
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid Stripe signature")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+
+        customer_email = session.get("customer_details", {}).get("email")
+        # If you set metadata on the Checkout Session with price_id
+        price_id = None
+        if session.get("metadata"):
+            price_id = session["metadata"].get("price_id")
+
+        calls_limit = map_price_to_quota(price_id, session)
+
+        if customer_email and calls_limit:
+            # Normal user keys use "sk_" prefix
+            api_key = create_api_key(customer_email, calls_limit, prefix="sk_")
+
+            # TODO: send email to customer_email with api_key
+            # For now you could log it, or later integrate with a mail provider.
+
+    return {"received": True}
