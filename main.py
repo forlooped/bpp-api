@@ -429,8 +429,40 @@ async def stripe_webhook(request: Request):
         if customer_email and calls_limit:
             # Normal user keys use "sk_" prefix
             api_key = create_api_key(customer_email, calls_limit, prefix="sk_")
-
             # TODO: send email to customer_email with api_key
             # For now you could log it, or later integrate with a mail provider.
 
     return {"received": True}
+
+@app.post("/create-checkout")
+def create_checkout_session(
+    price_id: str,
+    success_url: str = "https://backpocketpower.com/success",
+    cancel_url: str = "https://backpocketpower.com/cancel"
+):
+    """
+    Create a Stripe Checkout session for testing
+    Returns a URL you can visit to complete payment
+    """
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price": price_id,
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_email=None,  # Customer enters their email
+            metadata={
+                "price_id": price_id  # Pass price_id to webhook
+            }
+        )
+        
+        return {
+            "checkout_url": session.url,
+            "session_id": session.id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
