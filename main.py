@@ -467,3 +467,36 @@ def create_checkout_session(request: CheckoutRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/list-keys")
+def admin_list_keys(
+    admin_secret: str = Header(None, alias="X-Admin-Secret"),
+    limit: int = 10
+):
+    """List recent API keys (admin only)"""
+    ADMIN_SECRET = os.getenv("ADMIN_SECRET", "change-me-in-production")
+    
+    if admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT key, customer_email, calls_limit, calls_used, created_at FROM api_keys ORDER BY created_at DESC LIMIT ?",
+        (limit,)
+    )
+    rows = c.fetchall()
+    conn.close()
+    
+    return {
+        "keys": [
+            {
+                "key": row[0],
+                "email": row[1],
+                "calls_limit": row[2],
+                "calls_used": row[3],
+                "created_at": row[4]
+            }
+            for row in rows
+        ]
+    }
