@@ -434,12 +434,13 @@ async def stripe_webhook(request: Request):
 
     return {"received": True}
 
+class CheckoutRequest(BaseModel):
+    price_id: str
+    success_url: Optional[str] = "https://backpocketpower.com/success"
+    cancel_url: Optional[str] = "https://backpocketpower.com/cancel"
+
 @app.post("/create-checkout")
-def create_checkout_session(
-    price_id: str,
-    success_url: str = "https://backpocketpower.com/success",
-    cancel_url: str = "https://backpocketpower.com/cancel"
-):
+def create_checkout_session(request: CheckoutRequest):
     """
     Create a Stripe Checkout session for testing
     Returns a URL you can visit to complete payment
@@ -448,15 +449,15 @@ def create_checkout_session(
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=[{
-                "price": price_id,
+                "price": request.price_id,
                 "quantity": 1,
             }],
             mode="payment",
-            success_url=success_url,
-            cancel_url=cancel_url,
+            success_url=request.success_url,
+            cancel_url=request.cancel_url,
             customer_email=None,  # Customer enters their email
             metadata={
-                "price_id": price_id  # Pass price_id to webhook
+                "price_id": request.price_id  # Pass price_id to webhook
             }
         )
         
