@@ -374,24 +374,23 @@ def admin_create_key(
 # ============================================================================
 
 def map_price_to_quota(price_id: Optional[str], session: dict) -> Optional[int]:
-    """
-    Map Stripe price_id or amount to a calls_limit.
-    Adjust this mapping to your actual Stripe Price IDs and tiers.
-    """
-    price_map = {
-        # example IDs – replace with your real Stripe price IDs
-        "price_1SoYfhRukSFCFHitug24PRqn": 1000,   # e.g. $20 → 1000 calls
-        "price_1SoYg3RukSFCFHitAy7ELzlX": 3000,  # e.g. $50 → 3000 calls
-        "price_1SoYgLRukSFCFHitT2eUkPQk": 10000,  # e.g. $100 → 10000 calls
-    }
+    small = os.getenv("PRICE_ID_SMALL")
+    medium = os.getenv("PRICE_ID_MEDIUM")
+    large = os.getenv("PRICE_ID_LARGE")
+
+    price_map = {}
+    if small:
+        price_map[small] = 1000
+    if medium:
+        price_map[medium] = 3000
+    if large:
+        price_map[large] = 10000
 
     if price_id and price_id in price_map:
         return price_map[price_id]
 
-    # Fallback: derive from amount_total (Stripe Checkout)
     amount_cents = session.get("amount_total")
     if amount_cents:
-        # Example: 1 cent = 1 call (tune as needed)
         return int(amount_cents)
 
     return None
