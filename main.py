@@ -380,9 +380,9 @@ def map_price_to_quota(price_id: Optional[str], session: dict) -> Optional[int]:
     """
     price_map = {
         # example IDs – replace with your real Stripe price IDs
-        "price_bpp_small": 1000,   # e.g. $20 → 1000 calls
-        "price_bpp_medium": 3000,  # e.g. $50 → 3000 calls
-        "price_bpp_large": 10000,  # e.g. $100 → 10000 calls
+        "price_1SoYfhRukSFCFHitug24PRqn": 1000,   # e.g. $20 → 1000 calls
+        "price_1SoYg3RukSFCFHitAy7ELzlX": 3000,  # e.g. $50 → 3000 calls
+        "price_1SoYgLRukSFCFHitT2eUkPQk": 10000,  # e.g. $100 → 10000 calls
     }
 
     if price_id and price_id in price_map:
